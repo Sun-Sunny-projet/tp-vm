@@ -1,0 +1,10 @@
+*.img
+*.qcow2
+*.iso
+id_vm
+id_vm.pub
+user-data
+meta-data
+vm.pid
+*.log
+*.pub
