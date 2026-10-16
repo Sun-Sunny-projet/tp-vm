@@ -1,0 +1,90 @@
+---
+- name: Installer MySQL et importer la base de test DNS (PowerDNS)
+  hosts: dbservers
+  become: true
+  vars:
+    db_name: TPVM
+    db_user: TPVM
+    db_password: "TPVM2026"
+    mysql_socket: /var/run/mysqld/mysqld.sock
+    dump_url: "https://gist.github.com/Habbie/5466890/raw/26fd90e69a500d3581bde8b43d2ea8149432655b/dump.sql"
+    dump_path: /tmp/dump.sql
+
+  tasks:
+    - name: Installer MySQL et le connecteur Python
+      ansible.builtin.apt:
+        name:
+          - mysql-server
+          - python3-pymysql
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Démarrer et activer MySQL
+      ansible.builtin.service:
+        name: mysql
+        state: started
+        enabled: true
+
+    - name: Créer la base de données
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+
+    - name: Créer l'utilisateur de la base
+      community.mysql.mysql_user:
+        name: "{{ db_user }}"
+        password: "{{ db_password }}"
+        update_password: on_create
+        host: localhost
+        priv: "{{ db_name }}.*:ALL"
+        state: present
+        login_unix_socket: "{{ mysql_socket }}"
+      no_log: true
+
+    - name: Vérifier si la table domains existe déjà
+      community.mysql.mysql_query:
+        login_db: "{{ db_name }}"
+        login_unix_socket: "{{ mysql_socket }}"
+        query: "SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema = '{{ db_name }}' AND table_name = 'domains'"
+      register: domains_check
+      changed_when: false
+
+    - name: Télécharger le dump (révision figée du gist)
+      ansible.builtin.get_url:
+        url: "{{ dump_url }}"
+        dest: "{{ dump_path }}"
+        mode: "0644"
+      when: domains_check.query_result[0][0].n | int == 0
+
+    - name: Remplacer l'ancienne syntaxe TYPE= par ENGINE=
+      ansible.builtin.replace:
+        path: "{{ dump_path }}"
+        regexp: '\) TYPE='
+        replace: ') ENGINE='
+      when: domains_check.query_result[0][0].n | int == 0
+
+    - name: Importer le dump
+      community.mysql.mysql_db:
+        name: "{{ db_name }}"
+        state: import
+        target: "{{ dump_path }}"
+        login_unix_socket: "{{ mysql_socket }}"
+      when: domains_check.query_result[0][0].n | int == 0
+
+    - name: Requête de contrôle sur les enregistrements DNS
+      community.mysql.mysql_query:
+        login_db: "{{ db_name }}"
+        login_unix_socket: "{{ mysql_socket }}"
+        query: >-
+          SELECT d.name AS domaine, r.name AS nom, r.type, r.content, r.ttl
+          FROM records r JOIN domains d ON d.id = r.domain_id
+          WHERE r.type IN ('A', 'MX', 'CNAME')
+          ORDER BY d.name, r.type, r.name
+      register: result
+      changed_when: false
+
+    - name: Afficher le résultat
+      ansible.builtin.debug:
+        var: result.query_result[0]
