@@ -1,0 +1,121 @@
+---
+# 1) Compilation sur le poste de contrôle (WSL) : la VM, émulée sans KVM, est trop lente pour Maven
+- name: Compiler l'application Spring Boot
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    project_dir: "{{ playbook_dir }}/java-ansible/demo"
+  tasks:
+    - name: Construire le jar (tests ignorés, ils exigent la base MySQL)
+      ansible.builtin.command:
+        cmd: sh ./mvnw -B -q -DskipTests clean package
+        chdir: "{{ project_dir }}"
+      changed_when: true
+
+# 2) Déploiement sur la VM : seul un JRE headless est nécessaire
+- name: Déployer l'application sur la VM
+  hosts: all
+  become: true
+  vars:
+    app_user: demo
+    app_dir: /opt/demo
+    jar_src: "{{ playbook_dir }}/java-ansible/demo/target/demo-0.0.1-SNAPSHOT.jar"
+    # Mêmes valeurs que dans playbook.yml
+    db_name: TPVM
+    db_user: TPVM
+    db_password: "TPVM2026"
+
+  tasks:
+    - name: Installer le JRE Java 17 (headless)
+      ansible.builtin.apt:
+        name: openjdk-17-jre-headless
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    - name: Créer l'utilisateur système de l'application
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        system: true
+        shell: /usr/sbin/nologin
+        home: "{{ app_dir }}"
+        create_home: false
+
+    - name: Créer le dossier de l'application
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        mode: "0755"
+
+    - name: Copier le jar
+      ansible.builtin.copy:
+        src: "{{ jar_src }}"
+        dest: "{{ app_dir }}/demo.jar"
+        owner: "{{ app_user }}"
+        mode: "0644"
+      notify: Redémarrer demo
+
+    - name: Fournir les paramètres de la base via l'environnement
+      ansible.builtin.copy:
+        content: |
+          DB_NAME={{ db_name }}
+          DB_USER={{ db_user }}
+          DB_PASSWORD={{ db_password }}
+        dest: /etc/demo.env
+        owner: root
+        mode: "0600"
+      no_log: true
+      notify: Redémarrer demo
+
+    - name: Installer le service systemd
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/demo.service
+        mode: "0644"
+        content: |
+          [Unit]
+          Description=Application Spring Boot demo
+          After=network.target mysql.service
+          Wants=mysql.service
+
+          [Service]
+          User={{ app_user }}
+          EnvironmentFile=/etc/demo.env
+          ExecStart=/usr/bin/java -Xmx256m -jar {{ app_dir }}/demo.jar
+          Restart=on-failure
+          NoNewPrivileges=true
+
+          [Install]
+          WantedBy=multi-user.target
+      notify: Redémarrer demo
+
+    - name: Appliquer les redémarrages en attente
+      ansible.builtin.meta: flush_handlers
+
+    - name: Activer et démarrer le service
+      ansible.builtin.systemd:
+        name: demo
+        enabled: true
+        state: started
+        daemon_reload: true
+
+    - name: Attendre que l'application réponde (démarrage lent en émulation)
+      ansible.builtin.uri:
+        url: http://127.0.0.1:8080/
+        return_content: true
+      register: reponse
+      until: reponse.status == 200
+      retries: 40
+      delay: 10
+
+    - name: Afficher la réponse de l'application
+      ansible.builtin.debug:
+        msg: "L'application tourne : {{ reponse.content }}"
+
+  handlers:
+    - name: Redémarrer demo
+      ansible.builtin.systemd:
+        name: demo
+        state: restarted
+        daemon_reload: true

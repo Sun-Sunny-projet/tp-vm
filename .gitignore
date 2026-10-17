@@ -8,3 +8,6 @@ meta-data
 vm.pid
 *.log
 *.pub
+target/
+.idea/
+*.zip
